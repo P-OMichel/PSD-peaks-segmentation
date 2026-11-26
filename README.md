@@ -1,7 +1,5 @@
 # Generation and Deep-Learning Segmentation of Oscillatory Bands in Neural Power Spectra
 
-Official repository for the paper **"Generation and Deep-Learning Segmentation of Oscillatory Bands in Neural Power Spectra"** by *Pierre-Olivier Michel and David Holcman* (Group of Data Modeling, Applied Mathematics and Computational Biology, IBENS, École Normale Supérieure-PSL, CNRS).
-
 ## Overview
 
 Transient narrow-band oscillatory bursts in neural recordings (such as EEG and LFP) appear as spectral peaks superimposed on an aperiodic $1/f^{\chi}$ power-law background. Downstream tasks—including band-pass filtering, time-frequency burst segmentation, and spectral artifact correction—require knowing the exact frequency interval supporting each peak. However, steep background slopes, estimator variance, and drifting peak frequencies under anesthesia or pathology make fixed canonical bands ($\delta, \theta, \alpha, \beta, \gamma$) and standard parametric fits (e.g., FOOOF/specparam) unreliable.
@@ -10,11 +8,15 @@ This repository implements a **three-stage, band-agnostic framework** that learn
 
 1. **Synthetic PSD Generative Model:** Simulates realistic neural power spectral densities combining aperiodic $1/f^{\chi}$ backgrounds (with or without a spectral knee), four peak line-shape families (including the Lorentzian spectrum of a burst-generating 2D Ornstein-Uhlenbeck process), optional asymmetric post-peak tails, and multiplicative Gamma noise matching Welch's periodogram averaging.
 2. **Deterministic Reference Band Segmentation:** Extracts reproducible ground-truth frequency intervals on clean PSDs using midpoint partitioning, local asymmetric Whittaker baseline smoothing, topographic prominence detection, and power-ratio boundary refinement.
-3. **Multi-Task 1-D Residual U-Net:** Takes a single noisy log-PSD and jointly predicts:
+3. **neural Network model:** Takes a single noisy log-PSD and jointly predicts:
    * The **denoised log-PSD**
    * A **Gaussian keypoint heatmap** of peak centers ($\hat{H}$)
    * **Dense left and right band boundary distances** ($\hat{D}_L, \hat{D}_R$)
 
+
+Example of inference output on noisy PSD input:
+
+![Output](Image/Output.png)
 ---
 
 ## Key Features & Benchmark Highlights
@@ -39,103 +41,17 @@ $$P_{\text{clean}}(f) = P_{\text{bg}}(f) + \sum_{k=1}^{K} P_{\text{peak}, k}(f)$
 * **Peak Line Shapes:** Drawn equally from **2D Ornstein-Uhlenbeck (Lorentzian)**, **Pseudo-Voigt**, **Pearson Type IV**, and **Student-$t$** distributions, with an optional asymmetric post-peak relaxation tail.
 * **Welch Noise & Grid Resampling:** Interpolated onto variable observation grids ($N_{\text{obs}} \in [80, 350]$), corrupted with multiplicative Gamma noise $\xi(f) \sim \Gamma(K_{\text{seg}}, K_{\text{seg}}^{-1})$, and resampled back to the canonical grid.
 
-### 2. Multi-Task 1-D U-Net Architecture
-* **Backbone:** Shallow 1-D U-Net with two pooling stages and residual convolution blocks (`Conv1D` $\rightarrow$ `BatchNorm` $\rightarrow$ `GELU` + skip connection).
+### 2. model Architecture
+* **Backbone:** Shallow backbone 1-D U-Net with three output branches.
 * **Loss Objective:** Jointly optimizes smooth-$L_1$ spectrum amplitude + first/second derivative losses ($\mathcal{L}_{\text{spec}}$), penalty-reduced focal loss for center heatmaps ($\mathcal{L}_{\text{heat}}$), and masked smooth-$L_1$ / $L_2$ boundary distance regression ($\mathcal{L}_{\text{width}}$).
 
 ---
 
-## Repository Structure
+## Contact
 
-*(Update paths below to match your exact codebase layout)*
-
-```text
-├── data/                   # Synthetic dataset generation & VitalDB preprocessing scripts
-├── models/                 # 1-D Residual U-Net architecture & multi-task loss functions
-├── segmentation/           # Asymmetric Whittaker baseline & power-ratio reference algorithm
-├── evaluation/             # FOOOF benchmark scripts & metrics (F1, localization MAE, RMSE)
-├── notebooks/              # Interactive inference & visualization examples
-├── train.py                # Training pipeline (AdamW, ReduceLROnPlateau, Early Stopping)
-├── inference.py            # Single-pass PSD denoising & band decoding script
-└── requirements.txt        # Python dependencies
-```
+The current repository will be the object of a patent and a research article in the months to come. 
+If you are interested in using such model for segmentation of PSD please send a mail to:
+pmichel@bio.ens.psl.eu
 
 ---
 
-## Getting Started
-
-### Prerequisites
-
-Install the required Python packages (PyTorch, SciPy, NumPy, Matplotlib, and `specparam`/`fooof` for benchmarking):
-
-```bash
-pip install torch numpy scipy matplotlib specparam
-```
-
-### 1. Generate Synthetic Training Corpus
-
-Generate the synthetic training, validation, and test datasets (`20,000 / 2,500 / 2,500` spectra) along with their reference Whittaker-segmented bands:
-
-```bash
-python data/generate_dataset.py --n_train 20000 --n_val 2500 --n_test 2500 --output_dir ./dataset
-```
-
-### 2. Train the Multi-Task 1-D U-Net
-
-Train the model using AdamW ($\text{lr} = 10^{-3}$, weight decay $10^{-4}$, batch size $32$):
-
-```bash
-python train.py --data_dir ./dataset --epochs 100 --batch_size 32 --save_dir ./checkpoints
-```
-
-### 3. Run Inference on a Noisy PSD
-
-Denoise an input PSD and decode peak centers and frequency support intervals ($\hat{I}_k = [\hat{p}_k - \hat{D}_L(\hat{p}_k), \hat{p}_k + \hat{D}_R(\hat{p}_k)]$) using heatmap threshold $\tau = 0.35$:
-
-```python
-import torch
-from models.unet1d import MultiTaskSpectralUNet
-from inference import decode_bands
-
-# Load trained model
-model = MultiTaskSpectralUNet(base_channels=32)
-model.load_state_dict(torch.load("checkpoints/best_model.pt"))
-model.eval()
-
-# noisy_log_psd: tensor of shape (1, 1, 250) on [0.1, 50] Hz grid
-with torch.no_grad():
-    denoised_psd, center_heatmap, boundary_offsets = model(noisy_log_psd)
-
-# Extract sub-bin peak centers and [f_left, f_right] frequency intervals
-peaks, bands = decode_bands(center_heatmap, boundary_offsets, threshold=0.35)
-```
-
----
-
-## Visual Overview
-
-*(Place your generated figures in an `assets/` folder to display them here)*
-
-```markdown
-![Synthetic Decomposition & Model Architecture](assets/pipeline_overview.png)
-![Benchmark vs FOOOF and VitalDB EEG Results](assets/benchmark_results.png)
-```
-
----
-
-## Citation
-
-If you use this code or synthetic generative framework in your research, please cite:
-
-```bibtex
-@article{michel2026generation,
-  title={Generation and Deep-Learning Segmentation of Oscillatory Bands in Neural Power Spectra},
-  author={Michel, Pierre-Olivier and Holcman, David},
-  journal={IEEE Transactions on [Journal]},
-  year={2026}
-}
-```
-
-## License
-
-*(Specify your license here, e.g., MIT License or GPL-3.0)*

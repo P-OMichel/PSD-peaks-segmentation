@@ -1,3 +1,7 @@
 Figure scripts/
 Figures/
 Fitting_methods/
+example_padding_strategies.py/
+eeg_psd_multinoise_benchmark_aligned.npz/
+test.py/
+to_do.txt/
