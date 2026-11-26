@@ -383,7 +383,7 @@ if __name__ == "__main__":
     run_multinoise_joint_benchmark(
         model=unet_model,
         dataset_path="eeg_psd_multinoise_benchmark_aligned.npz",
-        checkpoint_path="DL_checkpoints/Deformable_UNet(3).pth",
+        checkpoint_path="DL_checkpoints/Deformable_UNet(5).pth",
         batch_size=64,
         center_thresh=0.35,
         max_match_dist=2.0,

@@ -1,22 +1,26 @@
 """
 =============================================================================
 SYNTHETIC PSD DATASET GENERATOR WITH DIVERSE PEAK SHAPES & REALISTIC NOISE
+(DUAL REGIME: LINEAR-ADDITIVE & LOG-ADDITIVE GENERATION)
 =============================================================================
 Key Design Choices & Harmonized Parameters:
-1. Amplitude:
-   - A ~ Uniform(0.3, 8.0) uniformly applied across all peaks.
-2. Peak Width / Gamma:
+1. Dual Biophysical Generative Modes:
+   - 50% chance 'linear': Added in linear power: P(f) = P_bg(f) + sum P_osc(f)
+   - 50% chance 'log': Added directly in log power: ln P(f) = ln P_bg(f) + sum G(f)
+2. Amplitude:
+   - A ~ Uniform(0.3, 8.0) uniformly applied across peak profiles.
+3. Peak Width / Gamma:
    - gamma ~ Uniform(0.5, 2.5) Hz across all peak shapes.
-3. Overlap Constraints:
+4. Overlap Constraints:
    - Joint rejection sampling ensures |f0_i - f0_j| >= k * (gamma_i + gamma_j)
      to prevent spectral merging and intersecting interval masks.
-4. Peak Line Shapes:
+5. Peak Line Shapes:
    - Randomly drawn from: Pseudo-Voigt, Ornstein-Uhlenbeck, Pearson IV, Student-t.
    - Includes optional right-side power-law decay tail (30% chance for f0 > 2 Hz).
-5. Noise Model:
+6. Noise Model:
    - Welch Averaged Periodogram Noise: Multiplicative Gamma noise in linear power:
      noise_mult ~ Gamma(shape=K, scale=1/K), where K ~ Uniform(4, 32) Welch segments.
-6. Grid & Resolution Interpolation:
+7. Grid & Resolution Interpolation:
    - Variable observation length N_obs ~ Uniform(80, 350) points.
    - Interpolates clean PSD to random observation grid, applies Welch noise,
      and re-interpolates back to canonical network input size (250 bins).
@@ -32,7 +36,7 @@ from Functions.extract_psd_bumps import extract_intervals_method1_detrended_seed
 
 
 # =====================================================================
-# 1. CORE SAMPLE GENERATOR (WITH NON-OVERLAP CONSTRAINTS)
+# 1. CORE SAMPLE GENERATOR (DUAL REGIME: LINEAR & LOG ADDITIVE)
 # =====================================================================
 def generate_single_psd_sample_unified(
     f: np.ndarray,
@@ -41,10 +45,14 @@ def generate_single_psd_sample_unified(
     max_placement_tries: int = 200,
 ):
     """
-    Synthesizes a clean continuous PSD with mixed peak shapes and guarantees
-    non-overlapping peaks by enforcing:
+    Synthesizes a clean continuous PSD with mixed peak shapes, supporting both
+    linear-additive and log-additive (FOOOF-like) generative formulations.
+    Guarantees non-overlapping peaks by enforcing:
         |f0_i - f0_j| >= sep_factor * (gamma_i + gamma_j)
     """
+    # 50% chance of linear addition vs. log addition
+    generation_mode = np.random.choice(["linear", "log"], p=[0.5, 0.5])
+
     # A. Background Component: 1/f^chi with optional knee
     chi = np.random.uniform(0.8, 3.0)
     b_amp = np.random.uniform(0.5, 3.0)
@@ -57,7 +65,13 @@ def generate_single_psd_sample_unified(
     else:
         bg = b_amp / (f_safe**chi)
 
-    psd_clean = bg.copy()
+    # State accumulation containers based on generation mode
+    if generation_mode == "linear":
+        psd_clean_linear = bg.copy()
+        log_clean = None
+    else:  # 'log'
+        log_clean = np.log(np.maximum(bg, 1e-12)).astype(np.float64)
+        psd_clean_linear = None
 
     # B. Peak Injections (0 to 4 non-overlapping peaks)
     n_peaks = np.random.choice([0, 1, 2, 3, 4], p=[0.1, 0.3, 0.3, 0.2, 0.1])
@@ -143,11 +157,32 @@ def generate_single_psd_sample_unified(
             peak_signal += np.where(f > f0, post_decay, 0.0)
             p_dict["beta_decay"] = beta_decay
 
-        psd_clean += peak_signal
+        # Inject peak according to selected generative formulation
+        if generation_mode == "linear":
+            psd_clean_linear += peak_signal
+        else:
+            # Normalize peak profile to [0, 1] relative to its center and scale log-height
+            max_val = np.max(peak_signal)
+            if max_val > 0:
+                normalized_profile = peak_signal / max_val
+            else:
+                normalized_profile = peak_signal
+            
+            # Map amplitude A into log-power scale [0.5, 3.0] natural log units
+            height_log = np.random.uniform(0.5, 3.0)
+            log_clean += height_log * normalized_profile
+            p_dict["height_log"] = height_log
+
         peak_params.append(p_dict)
 
-    log_clean = np.log(np.maximum(psd_clean, 1e-12)).astype(np.float32)
+    # Finalize log_clean curve in natural log space
+    if generation_mode == "linear":
+        log_clean = np.log(np.maximum(psd_clean_linear, 1e-12)).astype(np.float32)
+    else:
+        log_clean = log_clean.astype(np.float32)
+
     meta = {
+        "generation_mode": generation_mode,
         "n_peaks": len(peak_params),
         "b_amp": float(b_amp),
         "chi": float(chi),
@@ -188,7 +223,7 @@ def generate_and_save_mask_dataset(
         masks_arr = np.zeros((count, 2, n_freqs), dtype=np.float32)
 
         for i in range(count):
-            # 1. Synthesize clean continuous PSD curve without overlapping bumps
+            # 1. Synthesize clean continuous PSD curve (Linear or Log-additive)
             log_clean, meta = generate_single_psd_sample_unified(
                 f_canonical, f_max, sep_factor=sep_factor
             )
@@ -214,7 +249,7 @@ def generate_and_save_mask_dataset(
                 f_left = info["peak_edges"][0] if info["peak_edges"][0] is not None else info["segment_bounds"][0]
                 f_right = info["peak_edges"][1] if info["peak_edges"][1] is not None else info["segment_bounds"][1]
 
-                # Channel 0: Center frequency
+                # Channel 0: Ground-truth latent center frequency
                 peak_mask[np.argmin(np.abs(f_canonical - f0))] = 1.0
 
                 # Channel 1: Interval span
@@ -274,13 +309,13 @@ class PSDMaskDataset(Dataset):
 # EXECUTION DEMO
 # =====================================================================
 if __name__ == "__main__":
-    DATASET_PATH = "psd_dataset_masks.npz"
+    DATASET_PATH = "psd_dataset_masks_L.npz"
 
     generate_and_save_mask_dataset(
         filepath=DATASET_PATH,
-        n_train=20000,
-        n_val=2500,
-        n_test=2500,
+        n_train=40000,
+        n_val=5000,
+        n_test=5000,
         n_freqs=250,
         f_min=0.1,
         f_max=50.0,
